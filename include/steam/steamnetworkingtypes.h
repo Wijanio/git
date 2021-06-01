@@ -63,12 +63,14 @@ struct SteamNetAuthenticationStatus_t;
 struct SteamRelayNetworkStatus_t;
 struct SteamNetworkingMessagesSessionRequest_t;
 struct SteamNetworkingMessagesSessionFailed_t;
+struct SteamNetworkingFakeIPResult_t;
 
 typedef void (*FnSteamNetConnectionStatusChanged)( SteamNetConnectionStatusChangedCallback_t * );
 typedef void (*FnSteamNetAuthenticationStatusChanged)( SteamNetAuthenticationStatus_t * );
 typedef void (*FnSteamRelayNetworkStatusChanged)(SteamRelayNetworkStatus_t *);
 typedef void (*FnSteamNetworkingMessagesSessionRequest)(SteamNetworkingMessagesSessionRequest_t *);
 typedef void (*FnSteamNetworkingMessagesSessionFailed)(SteamNetworkingMessagesSessionFailed_t *);
+typedef void (*FnSteamNetworkingFakeIPResult)(SteamNetworkingFakeIPResult_t *);
 
 /// Handle used to identify a connection to a remote host.
 typedef uint32 HSteamNetConnection;
@@ -138,7 +140,7 @@ enum ESteamNetworkingAvailability
 enum ESteamNetworkingIdentityType
 {
 	// Dummy/empty/invalid.
-	// Plese note that if we parse a string that we don't recognize
+	// Please note that if we parse a string that we don't recognize
 	// but that appears reasonable, we will NOT use this type.  Instead
 	// we'll use k_ESteamNetworkingIdentityType_UnknownType.
 	k_ESteamNetworkingIdentityType_Invalid = 0,
@@ -180,6 +182,18 @@ enum ESteamNetworkingIdentityType
 
 	// Make sure this enum is stored in an int.
 	k_ESteamNetworkingIdentityType__Force32bit = 0x7fffffff,
+};
+
+/// "Fake IPs" are assigned to hosts, to make it easier to interface with
+/// older code that assumed all hosts will have an IPv4 address
+enum ESteamNetworkingFakeIPType
+{
+	k_ESteamNetworkingFakeIPType_Invalid, // Error, argument was not even an IP address, etc.
+	k_ESteamNetworkingFakeIPType_NotFake, // Argument was a valid IP, but was not from the reserved "fake" range
+	k_ESteamNetworkingFakeIPType_GlobalIPv4, // Globally unique (for a given app) IPv4 address.  Address space managed by Steam
+	k_ESteamNetworkingFakeIPType_LocalIPv4, // Locally unique IPv4 address.  Address space managed by the local process.  For internal use only; should not be shared!
+
+	k_ESteamNetworkingFakeIPType__Force32Bit = 0x7fffffff
 };
 
 #pragma pack(push,1)
@@ -232,6 +246,13 @@ struct SteamNetworkingIPAddr
 
 	/// See if two addresses are identical
 	bool operator==(const SteamNetworkingIPAddr &x ) const;
+
+	/// Classify address as FakeIP.  This function never returns
+	/// k_ESteamNetworkingFakeIPType_Invalid.
+	ESteamNetworkingFakeIPType GetFakeIPType() const;
+
+	/// Return true if we are a FakeIP
+	bool IsFakeIP() const { return GetFakeIPType() > k_ESteamNetworkingFakeIPType_NotFake; }
 };
 
 /// An abstract way to represent the identity of a network host.  All identities can
@@ -260,6 +281,9 @@ struct SteamNetworkingIdentity
 	const SteamNetworkingIPAddr *GetIPAddr() const; // returns null if we are not an IP address.
 	void SetIPv4Addr( uint32 nIPv4, uint16 nPort ); // Set to specified IPv4:port
 	uint32 GetIPv4() const; // returns 0 if we are not an IPv4 address.
+
+	ESteamNetworkingFakeIPType GetFakeIPType() const;
+	bool IsFakeIP() const { return GetFakeIPType() > k_ESteamNetworkingFakeIPType_NotFake; }
 
 	// "localhost" is equivalent for many purposes to "anonymous."  Our remote
 	// will identify us by the network address we use.
@@ -1380,6 +1404,10 @@ enum ESteamNetworkingConfigValue
 	/// ISteamNetworkingMessages.
 	k_ESteamNetworkingConfig_Callback_CreateConnectionSignaling = 206,
 
+	/// [global FnSteamNetworkingFakeIPResult] Callback that's invoked when
+	/// a FakeIP allocation finishes.  See: ISteamNetworkingSockets::BeginAsyncRequestFakeIP,
+	k_ESteamNetworkingConfig_Callback_FakeIPResult = 207,
+
 //
 // P2P connection settings
 //
@@ -1463,23 +1491,6 @@ enum ESteamNetworkingConfigValue
 	k_ESteamNetworkingConfig_SDRClient_FakeClusterPing = 36,
 
 //
-// Misc / debugging
-//
-
-	/// [global int32] 0 or 1.  Some variables are "dev" variables.  They are useful
-	/// for debugging, but should not be adjusted in production.  When this flag is false (the default),
-	/// such variables will not be enumerated by the ISteamnetworkingUtils::GetFirstConfigValue
-	/// ISteamNetworkingUtils::GetConfigValueInfo functions.  The idea here is that you
-	/// can use those functions to provide a generic mechanism to set any configuration
-	/// value from a console or configuration file, looking up the variable by name.  Depending
-	/// on your game, modifying other configuration values may also have negative effects, and
-	/// you may wish to further lock down which variables are allowed to be modified by the user.
-	/// (Maybe no variables!)  Or maybe you use a whitelist or blacklist approach.
-	///
-	/// (This flag is itself a dev variable.)
-	k_ESteamNetworkingConfig_EnumerateDevVars = 35,
-
-//
 // Log levels for debugging information of various subsystems.
 // Higher numeric values will cause more stuff to be printed.
 // See ISteamNetworkingUtils::SetDebugOutputFunction for more
@@ -1493,6 +1504,10 @@ enum ESteamNetworkingConfigValue
 	k_ESteamNetworkingConfig_LogLevel_PacketGaps = 16, // [connection int32] dropped packets
 	k_ESteamNetworkingConfig_LogLevel_P2PRendezvous = 17, // [connection int32] P2P rendezvous messages
 	k_ESteamNetworkingConfig_LogLevel_SDRRelayPings = 18, // [global int32] Ping relays
+
+
+	// Deleted, do not use
+	k_ESteamNetworkingConfig_DELETED_EnumerateDevVars = 35,
 
 	k_ESteamNetworkingConfigValue__Force32Bit = 0x7fffffff
 };
@@ -1690,6 +1705,7 @@ inline void SteamNetworkingIdentity::SetIPAddr( const SteamNetworkingIPAddr &add
 inline const SteamNetworkingIPAddr *SteamNetworkingIdentity::GetIPAddr() const { return m_eType == k_ESteamNetworkingIdentityType_IPAddress ? &m_ip : NULL; }
 inline void SteamNetworkingIdentity::SetIPv4Addr( uint32 nIPv4, uint16 nPort ) { m_eType = k_ESteamNetworkingIdentityType_IPAddress; m_cbSize = (int)sizeof(m_ip); m_ip.SetIPv4( nIPv4, nPort ); }
 inline uint32 SteamNetworkingIdentity::GetIPv4() const { return m_eType == k_ESteamNetworkingIdentityType_IPAddress ? m_ip.GetIPv4() : 0; }
+inline ESteamNetworkingFakeIPType SteamNetworkingIdentity::GetFakeIPType() const { return m_eType == k_ESteamNetworkingIdentityType_IPAddress ? m_ip.GetFakeIPType() : k_ESteamNetworkingFakeIPType_Invalid; }
 inline void SteamNetworkingIdentity::SetLocalHost() { m_eType = k_ESteamNetworkingIdentityType_IPAddress; m_cbSize = (int)sizeof(m_ip); m_ip.SetIPv6LocalHost(); }
 inline bool SteamNetworkingIdentity::IsLocalHost() const { return m_eType == k_ESteamNetworkingIdentityType_IPAddress && m_ip.IsLocalHost(); }
 inline bool SteamNetworkingIdentity::SetGenericString( const char *pszString ) { size_t l = strlen( pszString ); if ( l >= sizeof(m_szGenericString) ) return false;
